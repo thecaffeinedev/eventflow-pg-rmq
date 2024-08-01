@@ -1,0 +1,28 @@
+version: '3'
+
+services:
+  postgres:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: mydatabase
+      POSTGRES_USER: new_user
+      POSTGRES_PASSWORD: new_password
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  app:
+    build: .
+    environment:
+      PG_CONNECTION_STRING: "host=postgres dbname=mydatabase user=new_user password=new_password sslmode=disable"
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+    depends_on:
+      - postgres
+      - rabbitmq
