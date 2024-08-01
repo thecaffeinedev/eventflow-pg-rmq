@@ -13,6 +13,11 @@ services:
     ports:
       - "5432:5432"
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U new_user -d mydatabase"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 
   rabbitmq:
@@ -27,5 +32,7 @@ services:
       PG_CONNECTION_STRING: "host=postgres dbname=mydatabase user=new_user password=new_password sslmode=disable"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
     depends_on:
-      - postgres
-      - rabbitmq
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
