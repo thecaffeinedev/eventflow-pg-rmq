@@ -2,48 +2,110 @@ package pglistener
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
-	"time"
+	"strings"
+	"sync"
 
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thecaffeinedev/eventflow-pg-rmq/pkg/models"
 )
 
 type PgListener struct {
-	conn *pgconn.PgConn
+	dsn    string
+	replcn *pgconn.PgConn
+	cn     *pgxpool.Pool
+	slot   string
+	events []string
 }
 
-func New(connString string) (*PgListener, error) {
-	conn, err := pgconn.Connect(context.Background(), connString)
+func New(dsn string) (*PgListener, error) {
+	return &PgListener{
+		dsn:    dsn,
+		events: []string{"insert", "update", "delete"},
+	}, nil
+}
+
+func (pl *PgListener) connect(ctx context.Context) error {
+	config, err := pgxpool.ParseConfig(pl.dsn)
 	if err != nil {
-		return nil, fmt.Errorf("unable to connect to database: %v", err)
+		return err
+	}
+	config.MaxConns = 5
+	config.MinConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return err
+	}
+	pl.cn = pool
+
+	// Modify the DSN for replication connection
+	replDSN := pl.dsn
+	if strings.Contains(replDSN, "?") {
+		replDSN += "&replication=database"
+	} else {
+		replDSN += "?replication=database"
 	}
 
-	return &PgListener{conn: conn}, nil
+	replcn, err := pgconn.Connect(ctx, replDSN)
+	if err != nil {
+		return err
+	}
+	pl.replcn = replcn
+	return nil
+}
+
+func (pl *PgListener) createPublication(ctx context.Context) error {
+	_, err := pl.cn.Exec(ctx, "CREATE PUBLICATION all_tables FOR ALL TABLES")
+	if err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			log.Println("Publication 'all_tables' already exists")
+			return nil
+		}
+		return err
+	}
+	log.Println("Publication 'all_tables' created successfully")
+	return nil
+}
+
+func (pl *PgListener) createReplicationSlot(ctx context.Context) error {
+	_, err := pglogrepl.CreateReplicationSlot(ctx, pl.replcn, pl.slot, "pgoutput", pglogrepl.CreateReplicationSlotOptions{Temporary: false})
+	if err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			log.Printf("Replication slot '%s' already exists", pl.slot)
+			return nil
+		}
+		return err
+	}
+	log.Printf("Replication slot '%s' created successfully", pl.slot)
+	return nil
 }
 
 func (pl *PgListener) Listen(ctx context.Context) (<-chan models.Event, error) {
-	err := createPublication(ctx, pl.conn)
+	err := pl.connect(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error creating publication: %v", err)
+		return nil, fmt.Errorf("failed to connect: %v", err)
 	}
 
-	slotName := "cdc_slot"
-	err = createReplicationSlot(ctx, pl.conn, slotName)
+	err = pl.createPublication(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error creating replication slot: %v", err)
+		return nil, fmt.Errorf("failed to create publication: %v", err)
+	}
+
+	pl.slot = "cdc_slot"
+	err = pl.createReplicationSlot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create replication slot: %v", err)
 	}
 
 	eventChan := make(chan models.Event)
 
 	go func() {
 		defer close(eventChan)
-
-		err := startReplication(ctx, pl.conn, slotName, eventChan)
+		err := pl.startReplication(ctx, eventChan)
 		if err != nil {
 			log.Printf("Error in replication: %v", err)
 		}
@@ -52,121 +114,128 @@ func (pl *PgListener) Listen(ctx context.Context) (<-chan models.Event, error) {
 	return eventChan, nil
 }
 
-func createPublication(ctx context.Context, conn *pgconn.PgConn) error {
-	result := conn.Exec(ctx, "CREATE PUBLICATION all_tables FOR ALL TABLES")
-	err := result.Close()
-	if err != nil {
-		// Check if the error is because the publication already exists
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "42710" {
-			// Publication already exists, log and continue
-			log.Printf("Publication 'all_tables' already exists")
-			return nil
-		}
-		return fmt.Errorf("error creating publication: %v", err)
-	}
-	return nil
-}
-
-func createReplicationSlot(ctx context.Context, conn *pgconn.PgConn, slotName string) error {
-	_, err := pglogrepl.CreateReplicationSlot(ctx, conn, slotName, "pgoutput", pglogrepl.CreateReplicationSlotOptions{Temporary: false})
-	if err != nil {
-		// Check if the error is because the slot already exists
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "42710" {
-			log.Printf("Replication slot '%s' already exists", slotName)
-			return nil
-		}
-		return fmt.Errorf("error creating replication slot: %v", err)
-	}
-	return nil
-}
-
-func startReplication(ctx context.Context, conn *pgconn.PgConn, slotName string, eventChan chan<- models.Event) error {
-	err := pglogrepl.StartReplication(ctx, conn, slotName, 0, pglogrepl.StartReplicationOptions{
+func (pl *PgListener) startReplication(ctx context.Context, eventChan chan<- models.Event) error {
+	err := pglogrepl.StartReplication(ctx, pl.replcn, pl.slot, 0, pglogrepl.StartReplicationOptions{
 		PluginArgs: []string{
 			"proto_version '1'",
 			"publication_names 'all_tables'",
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("error starting replication: %v", err)
+		return fmt.Errorf("failed to start replication: %v", err)
 	}
 
-	clientXLogPos := pglogrepl.LSN(0)
-	standbyMessageTimeout := time.Second * 10
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		pl.handleReplication(ctx, eventChan)
+	}()
 
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
+	wg.Wait()
+	return nil
+}
 
-		ctx, cancel := context.WithTimeout(ctx, standbyMessageTimeout)
-		rawMsg, err := conn.ReceiveMessage(ctx)
-		cancel()
+func (pl *PgListener) handleReplication(ctx context.Context, eventChan chan<- models.Event) {
+	tables := make(map[uint32]string)
+	columns := make(map[uint32][]string)
+
+	for ctx.Err() == nil {
+		msg, err := pl.replcn.ReceiveMessage(ctx)
 		if err != nil {
 			if pgconn.Timeout(err) {
-				err = sendStandbyStatusUpdate(ctx, conn, clientXLogPos)
+				continue
+			}
+			log.Printf("Failed to receive message: %v", err)
+			break
+		}
+
+		switch msg := msg.(type) {
+		case *pgproto3.CopyData:
+			switch msg.Data[0] {
+			case pglogrepl.XLogDataByteID:
+				xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
 				if err != nil {
-					return fmt.Errorf("error sending standby status update: %v", err)
+					log.Printf("Failed to parse XLogData: %v", err)
+					continue
 				}
-				continue
-			}
-			return fmt.Errorf("error receiving message: %v", err)
-		}
 
-		if errMsg, ok := rawMsg.(*pgproto3.ErrorResponse); ok {
-			return fmt.Errorf("error from Postgres: %s", errMsg.Message)
-		}
-
-		msg, ok := rawMsg.(*pgproto3.CopyData)
-		if !ok {
-			continue
-		}
-
-		switch msg.Data[0] {
-		case pglogrepl.XLogDataByteID:
-			xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
-			if err != nil {
-				return fmt.Errorf("error parsing XLogData: %v", err)
-			}
-			clientXLogPos = xld.WALStart + pglogrepl.LSN(len(xld.WALData))
-
-			event, err := parseWALData(xld.WALData)
-			if err != nil {
-				log.Printf("Error parsing WAL data: %v", err)
-				continue
-			}
-			eventChan <- event
-
-		case pglogrepl.PrimaryKeepaliveMessageByteID:
-			pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(msg.Data[1:])
-			if err != nil {
-				return fmt.Errorf("error parsing PrimaryKeepaliveMessage: %v", err)
-			}
-			if pkm.ReplyRequested {
-				err = sendStandbyStatusUpdate(ctx, conn, clientXLogPos)
+				logicalMsg, err := pglogrepl.Parse(xld.WALData)
 				if err != nil {
-					return fmt.Errorf("error sending standby status update: %v", err)
+					log.Printf("Failed to parse logical replication message: %v", err)
+					continue
+				}
+
+				switch logicalMsg := logicalMsg.(type) {
+				case *pglogrepl.RelationMessage:
+					tables[logicalMsg.RelationID] = logicalMsg.RelationName
+					columns[logicalMsg.RelationID] = make([]string, len(logicalMsg.Columns))
+					for i, col := range logicalMsg.Columns {
+						columns[logicalMsg.RelationID][i] = col.Name
+					}
+
+				case *pglogrepl.InsertMessage:
+					tableName := tables[logicalMsg.RelationID]
+					values := parseValues(columns[logicalMsg.RelationID], logicalMsg.Tuple)
+					event := models.Event{
+						Action:    "INSERT",
+						TableName: tableName,
+						Data:      values,
+					}
+					eventChan <- event
+
+				case *pglogrepl.UpdateMessage:
+					tableName := tables[logicalMsg.RelationID]
+					newValues := parseValues(columns[logicalMsg.RelationID], logicalMsg.NewTuple)
+					event := models.Event{
+						Action:    "UPDATE",
+						TableName: tableName,
+						Data:      newValues,
+					}
+					eventChan <- event
+
+				case *pglogrepl.DeleteMessage:
+					tableName := tables[logicalMsg.RelationID]
+					oldValues := parseValues(columns[logicalMsg.RelationID], logicalMsg.OldTuple)
+					event := models.Event{
+						Action:    "DELETE",
+						TableName: tableName,
+						Data:      oldValues,
+					}
+					eventChan <- event
+				}
+
+			case pglogrepl.PrimaryKeepaliveMessageByteID:
+				_, err := pglogrepl.ParsePrimaryKeepaliveMessage(msg.Data[1:])
+				if err != nil {
+					log.Printf("Failed to parse primary keepalive message: %v", err)
+					continue
+				}
+				err = pglogrepl.SendStandbyStatusUpdate(ctx, pl.replcn, pglogrepl.StandbyStatusUpdate{WALWritePosition: pglogrepl.LSN(0)})
+				if err != nil {
+					log.Printf("Failed to send standby status update: %v", err)
 				}
 			}
 		}
 	}
 }
 
-func sendStandbyStatusUpdate(ctx context.Context, conn *pgconn.PgConn, clientXLogPos pglogrepl.LSN) error {
-	return pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{
-		WALWritePosition: clientXLogPos,
-	})
-}
-
-func parseWALData(data []byte) (models.Event, error) {
-	var event models.Event
-	err := json.Unmarshal(data, &event)
-	if err != nil {
-		return models.Event{}, fmt.Errorf("error unmarshaling event: %v", err)
+func parseValues(columns []string, tuple *pglogrepl.TupleData) map[string]interface{} {
+	values := make(map[string]interface{})
+	for i, col := range columns {
+		if i < len(tuple.Columns) {
+			values[col] = string(tuple.Columns[i].Data)
+		}
 	}
-	return event, nil
+	return values
 }
 
-func (pl *PgListener) Close(ctx context.Context) error {
-	return pl.conn.Close(ctx)
+func (pl *PgListener) Close() error {
+	if pl.cn != nil {
+		pl.cn.Close()
+	}
+	if pl.replcn != nil {
+		return pl.replcn.Close(context.Background())
+	}
+	return nil
 }

@@ -19,7 +19,6 @@ services:
       timeout: 5s
       retries: 5
 
-
   rabbitmq:
     image: rabbitmq:3-management
     ports:
