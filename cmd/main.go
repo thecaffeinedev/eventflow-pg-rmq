@@ -58,7 +58,7 @@ func main() {
 		}
 	}()
 
-	log.Println("Application is now running. Press Ctrl+C to shut down.")
+	log.Println("Application is now running. Access the CDC Events Viewer at http://localhost:8080")
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CDC Events Viewer</title>
+    <script src="https://unpkg.com/htmx.org@1.9.5"></script>
+    <script src="https://unpkg.com/json-formatter-js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f0f0f0; }
+        h1 { color: #333; }
+        #events { background-color: white; border-radius: 5px; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .event { margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 20px; }
+        .event:last-child { border-bottom: none; }
+    </style>
+</head>
+<body>
+    <h1>CDC Events Viewer</h1>
+    <div id="events" hx-sse="connect:/events">
+        <div hx-sse="swap:message">
+            <!-- Events will be inserted here -->
+        </div>
+    </div>
+
+    <script>
+        document.body.addEventListener('htmx:sseMessage', function(event) {
+            var eventData = JSON.parse(event.detail.data);
+            var formatter = new JSONFormatter(eventData, 2, { hoverPreviewEnabled: true });
+            var eventDiv = document.createElement('div');
+            eventDiv.className = 'event';
+            eventDiv.appendChild(formatter.render());
+            document.querySelector('#events').prepend(eventDiv);
+        });
+    </script>
+</body>
+</html>

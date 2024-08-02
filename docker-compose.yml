@@ -37,6 +37,8 @@ services:
       RABBITMQ_URL: ${RABBITMQ_URL}
     ports:
       - "8080:8080"
+    volumes:
+      - ./static:/app/static
     depends_on:
       postgres:
         condition: service_healthy
