@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thecaffeinedev/eventflow-pg-rmq/pkg/api"
 	"github.com/thecaffeinedev/eventflow-pg-rmq/pkg/health"
 	"github.com/thecaffeinedev/eventflow-pg-rmq/pkg/pglistener"
@@ -16,6 +17,7 @@ type App struct {
 	PgListener   *pglistener.PgListener
 	RmqPublisher *rabbitmq.RabbitMQPublisher
 	API          *api.API
+	DB           *pgxpool.Pool
 }
 
 func New(pgConnString, rabbitMQURL string) (*App, error) {
@@ -27,6 +29,15 @@ func New(pgConnString, rabbitMQURL string) (*App, error) {
 		}
 		log.Printf("Health check failed: %v. Retrying in 5 seconds...\n", err)
 		time.Sleep(5 * time.Second)
+	}
+
+	ctx := context.Background()
+	db, err := pgxpool.New(ctx, pgConnString)
+	if err != nil {
+		return nil, err
+	}
+	if err = db.Ping(ctx); err != nil {
+		return nil, err
 	}
 
 	pgListener, err := pglistener.New(pgConnString)
@@ -47,12 +58,13 @@ func New(pgConnString, rabbitMQURL string) (*App, error) {
 		return nil, err
 	}
 
-	apiHandler := api.New(pgListener, rmqPublisher)
+	apiHandler := api.New(pgListener, rmqPublisher, db)
 
 	return &App{
 		PgListener:   pgListener,
 		RmqPublisher: rmqPublisher,
 		API:          apiHandler,
+		DB:           db,
 	}, nil
 }
 
@@ -95,5 +107,8 @@ func (a *App) Close() {
 	}
 	if a.RmqPublisher != nil {
 		a.RmqPublisher.Close()
+	}
+	if a.DB != nil {
+		a.DB.Close()
 	}
 }
