@@ -4,9 +4,9 @@ services:
   postgres:
     image: postgres:14
     environment:
-      POSTGRES_DB: mydatabase
-      POSTGRES_USER: new_user
-      POSTGRES_PASSWORD: new_password
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./postgres-data:/var/lib/postgresql/data
       - ./postgresql.conf:/etc/postgresql/postgresql.conf
@@ -14,7 +14,7 @@ services:
       - "5432:5432"
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U new_user -d mydatabase"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -24,14 +24,21 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   app:
     build: .
     environment:
-      PG_CONNECTION_STRING: "host=postgres dbname=mydatabase user=new_user password=new_password sslmode=disable"
-      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+      PG_CONNECTION_STRING: ${PG_CONNECTION_STRING}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+    ports:
+      - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
-        condition: service_started
+        condition: service_healthy

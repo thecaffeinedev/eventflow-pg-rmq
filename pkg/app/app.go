@@ -3,8 +3,11 @@ package app
 import (
 	"context"
 	"log"
+	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/thecaffeinedev/eventflow-pg-rmq/pkg/api"
 	"github.com/thecaffeinedev/eventflow-pg-rmq/pkg/health"
 	"github.com/thecaffeinedev/eventflow-pg-rmq/pkg/pglistener"
 	"github.com/thecaffeinedev/eventflow-pg-rmq/pkg/rabbitmq"
@@ -13,6 +16,8 @@ import (
 type App struct {
 	PgListener   *pglistener.PgListener
 	RmqPublisher *rabbitmq.RabbitMQPublisher
+	API          *api.API
+	DB           *pgxpool.Pool
 }
 
 func New(pgConnString, rabbitMQURL string) (*App, error) {
@@ -24,6 +29,15 @@ func New(pgConnString, rabbitMQURL string) (*App, error) {
 		}
 		log.Printf("Health check failed: %v. Retrying in 5 seconds...\n", err)
 		time.Sleep(5 * time.Second)
+	}
+
+	ctx := context.Background()
+	db, err := pgxpool.New(ctx, pgConnString)
+	if err != nil {
+		return nil, err
+	}
+	if err = db.Ping(ctx); err != nil {
+		return nil, err
 	}
 
 	pgListener, err := pglistener.New(pgConnString)
@@ -44,27 +58,47 @@ func New(pgConnString, rabbitMQURL string) (*App, error) {
 		return nil, err
 	}
 
+	apiHandler := api.New(pgListener, rmqPublisher, db)
+
 	return &App{
 		PgListener:   pgListener,
 		RmqPublisher: rmqPublisher,
+		API:          apiHandler,
+		DB:           db,
 	}, nil
 }
 
 func (a *App) Run(ctx context.Context) error {
-	changes, err := a.PgListener.Listen(ctx)
-	if err != nil {
-		return err
-	}
-
-	for change := range changes {
-		if err := a.RmqPublisher.Publish(change); err != nil {
-			log.Printf("Failed to publish change: %v", err)
-		} else {
-			log.Printf("Successfully published change: %v", change)
+	go func() {
+		changes, err := a.PgListener.Listen(ctx)
+		if err != nil {
+			log.Printf("Failed to start listening: %v", err)
+			return
 		}
+
+		for change := range changes {
+			if err := a.RmqPublisher.Publish(change); err != nil {
+				log.Printf("Failed to publish change: %v", err)
+			} else {
+				log.Printf("Successfully published change: %v", change)
+			}
+		}
+	}()
+
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: a.API.SetupRoutes(),
 	}
 
-	return nil
+	go func() {
+		log.Println("Starting API server on :8080")
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			log.Printf("HTTP server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	return server.Shutdown(context.Background())
 }
 
 func (a *App) Close() {
@@ -73,5 +107,8 @@ func (a *App) Close() {
 	}
 	if a.RmqPublisher != nil {
 		a.RmqPublisher.Close()
+	}
+	if a.DB != nil {
+		a.DB.Close()
 	}
 }
