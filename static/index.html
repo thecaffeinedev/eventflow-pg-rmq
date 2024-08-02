@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CDC Events Viewer</title>
+    <script src="https://unpkg.com/htmx.org@1.9.5"></script>
+    <script src="https://unpkg.com/json-formatter-js"></script>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background-color: #f0f0f0; 
+        }
+        h1, h2 { 
+            color: #333; 
+        }
+        .container {
+            display: flex;
+            justify-content: space-between;
+        }
+        .left-panel, .right-panel {
+            width: 48%;
+            background-color: white;
+            border-radius: 5px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        #userForm {
+            display: flex;
+            flex-direction: column;
+        }
+        #userForm input, #userForm button {
+            margin-bottom: 10px;
+            padding: 8px;
+        }
+        #userForm button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        #userForm button:hover {
+            background-color: #45a049;
+        }
+        #events {
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        .event {
+            margin-bottom: 20px;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 20px;
+        }
+        .event:last-child {
+            border-bottom: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>CDC Events Viewer</h1>
+    <div class="container">
+        <div class="left-panel">
+            <h2>Add New User</h2>
+            <form id="userForm" hx-post="/users" hx-swap="none">
+                <input type="text" name="name" placeholder="Full Name" required>
+                <input type="email" name="email" placeholder="Email" required>
+                <button type="submit">Add User</button>
+            </form>
+        </div>
+        <div class="right-panel">
+            <h2>Event Stream</h2>
+            <div id="events" hx-sse="connect:/events">
+                <div hx-sse="swap:message">
+                    <!-- events gets inserted here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.body.addEventListener('htmx:sseMessage', function(event) {
+            var eventData = JSON.parse(event.detail.data);
+            var formatter = new JSONFormatter(eventData, 2, { hoverPreviewEnabled: true });
+            var eventDiv = document.createElement('div');
+            eventDiv.className = 'event';
+            eventDiv.appendChild(formatter.render());
+            document.querySelector('#events').prepend(eventDiv);
+        });
+
+        document.getElementById('userForm').addEventListener('htmx:afterRequest', function(event) {
+            if (event.detail.successful) {
+                this.reset();
+                alert('User added successfully!');
+            } else {
+                alert('Error adding user. Please try again.');
+            }
+        });
+    </script>
+</body>
+</html>
