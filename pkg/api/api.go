@@ -137,14 +137,18 @@ func (a *API) HandleUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var user models.User
-	err := json.NewDecoder(r.Body).Decode(&user)
+	// Parse the form data
+	err := r.ParseForm()
 	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		http.Error(w, "Failed to parse form data", http.StatusBadRequest)
 		return
 	}
 
-	if user.Name == "" || user.Email == "" {
+	name := r.FormValue("name")
+	email := r.FormValue("email")
+
+	// Validate user data
+	if name == "" || email == "" {
 		http.Error(w, "Name and email are required", http.StatusBadRequest)
 		return
 	}
@@ -153,7 +157,7 @@ func (a *API) HandleUsers(w http.ResponseWriter, r *http.Request) {
 	var id int
 	err = a.DB.QueryRow(context.Background(),
 		"INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id",
-		user.Name, user.Email).Scan(&id)
+		name, email).Scan(&id)
 	if err != nil {
 		log.Printf("Failed to insert user: %v", err)
 		http.Error(w, "Failed to create user", http.StatusInternalServerError)
@@ -166,14 +170,14 @@ func (a *API) HandleUsers(w http.ResponseWriter, r *http.Request) {
 		TableName: "public.users",
 		New: map[string]interface{}{
 			"id":    id,
-			"name":  user.Name,
-			"email": user.Email,
+			"name":  name,
+			"email": email,
 		},
 		ID: id,
 		Diff: map[string]interface{}{
 			"id":    id,
-			"name":  user.Name,
-			"email": user.Email,
+			"name":  name,
+			"email": email,
 		},
 	}
 
