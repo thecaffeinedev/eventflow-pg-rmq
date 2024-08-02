@@ -168,7 +168,7 @@ func (pl *PgListener) handleReplication(ctx context.Context, eventChan chan<- mo
 
 				switch logicalMsg := logicalMsg.(type) {
 				case *pglogrepl.RelationMessage:
-					tables[logicalMsg.RelationID] = logicalMsg.RelationName
+					tables[logicalMsg.RelationID] = fmt.Sprintf("public.%s", logicalMsg.RelationName)
 					columns[logicalMsg.RelationID] = make([]string, len(logicalMsg.Columns))
 					for i, col := range logicalMsg.Columns {
 						columns[logicalMsg.RelationID][i] = col.Name
@@ -176,21 +176,42 @@ func (pl *PgListener) handleReplication(ctx context.Context, eventChan chan<- mo
 
 				case *pglogrepl.InsertMessage:
 					tableName := tables[logicalMsg.RelationID]
-					values := parseValues(columns[logicalMsg.RelationID], logicalMsg.Tuple)
+					newValues := parseValues(columns[logicalMsg.RelationID], logicalMsg.Tuple)
 					event := models.Event{
-						Action:    "INSERT",
+						Action:    "I",
 						TableName: tableName,
-						Data:      values,
+						Old:       map[string]interface{}{},
+						New:       newValues,
+						Diff:      newValues,
+					}
+					if id, ok := newValues["id"]; ok {
+						if idInt, ok := id.(float64); ok {
+							event.ID = int(idInt)
+						}
 					}
 					eventChan <- event
 
 				case *pglogrepl.UpdateMessage:
 					tableName := tables[logicalMsg.RelationID]
+					oldValues := parseValues(columns[logicalMsg.RelationID], logicalMsg.OldTuple)
 					newValues := parseValues(columns[logicalMsg.RelationID], logicalMsg.NewTuple)
+					diffValues := make(map[string]interface{})
+					for k, v := range newValues {
+						if oldValues[k] != v {
+							diffValues[k] = v
+						}
+					}
 					event := models.Event{
-						Action:    "UPDATE",
+						Action:    "U",
 						TableName: tableName,
-						Data:      newValues,
+						Old:       oldValues,
+						New:       newValues,
+						Diff:      diffValues,
+					}
+					if id, ok := newValues["id"]; ok {
+						if idInt, ok := id.(float64); ok {
+							event.ID = int(idInt)
+						}
 					}
 					eventChan <- event
 
@@ -198,9 +219,16 @@ func (pl *PgListener) handleReplication(ctx context.Context, eventChan chan<- mo
 					tableName := tables[logicalMsg.RelationID]
 					oldValues := parseValues(columns[logicalMsg.RelationID], logicalMsg.OldTuple)
 					event := models.Event{
-						Action:    "DELETE",
+						Action:    "D",
 						TableName: tableName,
-						Data:      oldValues,
+						Old:       oldValues,
+						New:       map[string]interface{}{},
+						Diff:      map[string]interface{}{},
+					}
+					if id, ok := oldValues["id"]; ok {
+						if idInt, ok := id.(float64); ok {
+							event.ID = int(idInt)
+						}
 					}
 					eventChan <- event
 				}
@@ -219,7 +247,6 @@ func (pl *PgListener) handleReplication(ctx context.Context, eventChan chan<- mo
 		}
 	}
 }
-
 func parseValues(columns []string, tuple *pglogrepl.TupleData) map[string]interface{} {
 	values := make(map[string]interface{})
 	for i, col := range columns {

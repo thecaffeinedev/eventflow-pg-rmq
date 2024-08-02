@@ -1,9 +1,12 @@
 package models
 
 type Event struct {
-	Action    string                 `json:"action"`
 	TableName string                 `json:"table_name"`
-	Data      map[string]interface{} `json:"data"`
+	Old       map[string]interface{} `json:"old"`
+	New       map[string]interface{} `json:"new"`
+	ID        int                    `json:"id"`
+	Diff      map[string]interface{} `json:"diff"`
+	Action    string                 `json:"action"`
 }
 
 type User struct {
