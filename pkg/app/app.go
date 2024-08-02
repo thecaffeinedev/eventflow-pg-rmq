@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"log"
+	"net/http"
 	"time"
 
+	"github.com/thecaffeinedev/eventflow-pg-rmq/pkg/api"
 	"github.com/thecaffeinedev/eventflow-pg-rmq/pkg/health"
 	"github.com/thecaffeinedev/eventflow-pg-rmq/pkg/pglistener"
 	"github.com/thecaffeinedev/eventflow-pg-rmq/pkg/rabbitmq"
@@ -13,6 +15,7 @@ import (
 type App struct {
 	PgListener   *pglistener.PgListener
 	RmqPublisher *rabbitmq.RabbitMQPublisher
+	API          *api.API
 }
 
 func New(pgConnString, rabbitMQURL string) (*App, error) {
@@ -44,27 +47,46 @@ func New(pgConnString, rabbitMQURL string) (*App, error) {
 		return nil, err
 	}
 
+	apiHandler := api.New(pgListener, rmqPublisher)
+
 	return &App{
 		PgListener:   pgListener,
 		RmqPublisher: rmqPublisher,
+		API:          apiHandler,
 	}, nil
 }
 
 func (a *App) Run(ctx context.Context) error {
-	changes, err := a.PgListener.Listen(ctx)
-	if err != nil {
-		return err
-	}
-
-	for change := range changes {
-		if err := a.RmqPublisher.Publish(change); err != nil {
-			log.Printf("Failed to publish change: %v", err)
-		} else {
-			log.Printf("Successfully published change: %v", change)
+	go func() {
+		changes, err := a.PgListener.Listen(ctx)
+		if err != nil {
+			log.Printf("Failed to start listening: %v", err)
+			return
 		}
+
+		for change := range changes {
+			if err := a.RmqPublisher.Publish(change); err != nil {
+				log.Printf("Failed to publish change: %v", err)
+			} else {
+				log.Printf("Successfully published change: %v", change)
+			}
+		}
+	}()
+
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: a.API.SetupRoutes(),
 	}
 
-	return nil
+	go func() {
+		log.Println("Starting API server on :8080")
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			log.Printf("HTTP server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	return server.Shutdown(context.Background())
 }
 
 func (a *App) Close() {
